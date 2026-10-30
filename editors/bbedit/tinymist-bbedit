@@ -17,6 +17,11 @@ Three gaps in BBEdit's LSP support are bridged here:
   textDocument/didChange, shortly after the last keystroke. Cursor
   movement without editing is invisible to the server.
 
+  The server resolves a position only when it sits right behind a
+  character of markup or math text, not in whitespace, markup syntax
+  or code. The proxy mirrors the documents BBEdit has open and moves
+  each position to the nearest such place before asking.
+
 - BBEdit has no workspace folders or project commands, so the server
   would compile every file on its own. A typst.toml in the project's
   root directory names the main file in its "entrypoint" field (the
@@ -34,12 +39,15 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from urllib.parse import unquote, urlparse
 
 SHOW_DOCUMENT = "window/showDocument"
 MANIFEST = "typst.toml"
-SOCKET = os.environ.get("TINYMIST_BBEDIT_SOCKET",
-                        os.path.expanduser("~/Library/Caches/tinymist-bbedit.sock"))
+CACHE = os.path.expanduser("~/Library/Caches")
+SOCKET = os.environ.get("TINYMIST_BBEDIT_SOCKET", os.path.join(CACHE, "tinymist-bbedit.sock"))
+# shared with the "Sync Typst with Preview" script
+LOG = os.path.join(CACHE, "tinymist-bbedit.log")
 # BBEdit starts servers with a minimal PATH
 EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.cargo/bin")]
 # task id of tinymist's background preview
@@ -51,11 +59,23 @@ PROJECT_METHODS = ("textDocument/didOpen", "textDocument/didChange", "textDocume
 FOLLOW_DELAY = 0.3
 # seconds tinymist gets to exit after BBEdit closed the connection
 EXIT_GRACE = 5
+# how far snapping looks for a text line around the cursor
+SNAP_LINES = 20
 ENTRYPOINT = re.compile(r'^\s*entrypoint\s*=\s*"([^"]+)"', re.MULTILINE)
+# a line of code or comment rather than markup: "// ...", "#let ...",
+# "#import ...", but not "#name[...]" with a content block
+CODE_LINE = re.compile(r"^\s*(//|#(?!\w+\[)[^\[]*$)")
+# code inside a markup line: "#name", "#name(args)", "@label", "<label>"
+CODE_SPAN = re.compile(r"#[\w.-]+(\([^()]*\))?|@[\w.:-]+|<[\w.:-]+>")
 
 
 def log(text):
     print("tinymist-bbedit:", text, file=sys.stderr, flush=True)
+    try:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%F %T") + " proxy: " + text + "\n")
+    except OSError:
+        pass
 
 
 def find(name):
@@ -103,6 +123,90 @@ def main_file_of(path):
         directory = parent
 
 
+# LSP positions count UTF-16 units; Python strings count code points.
+
+def utf16_len(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def utf16_index(line, units):
+    """Code-point index in line of the character after `units` UTF-16 units."""
+    return len(line.encode("utf-16-le")[:2 * units].decode("utf-16-le", "ignore"))
+
+
+def apply_change(text, change):
+    """Apply one ranged textDocument/didChange entry to text."""
+    lines = text.split("\n")
+    start, end = change["range"]["start"], change["range"]["end"]
+    first = lines[start["line"]][:utf16_index(lines[start["line"]], start["character"])]
+    last = lines[end["line"]][utf16_index(lines[end["line"]], end["character"]):]
+    lines[start["line"]:end["line"] + 1] = (first + change["text"] + last).split("\n")
+    return "\n".join(lines)
+
+
+def end_of_change(change):
+    """Position right behind the inserted text of a ranged change."""
+    start, text = change["range"]["start"], change["text"]
+    inserted = text.split("\n")
+    if len(inserted) == 1:
+        return start["line"], start["character"] + utf16_len(text)
+    return start["line"] + len(inserted) - 1, utf16_len(inserted[-1])
+
+
+def text_positions(line):
+    """Code-point indices right behind a letter or digit of markup text."""
+    if CODE_LINE.match(line):
+        return []
+    code = set()
+    for m in CODE_SPAN.finditer(line):
+        code.update(range(m.start(), m.end()))
+    return [i + 1 for i, ch in enumerate(line) if ch.isalnum() and i not in code]
+
+
+def snap(text, line, character):
+    """Move an LSP position to the nearest place the server can resolve."""
+    lines = text.split("\n")
+    if not 0 <= line < len(lines):
+        return line, character
+    cursor = utf16_index(lines[line], character)
+    here = text_positions(lines[line])
+    if here:
+        best = min(here, key=lambda i: abs(i - cursor))
+        return line, utf16_len(lines[line][:best])
+    for distance in range(1, SNAP_LINES + 1):
+        for other in (line + distance, line - distance):
+            if 0 <= other < len(lines):
+                there = text_positions(lines[other])
+                if there:
+                    return other, utf16_len(lines[other][:there[0]])
+    return line, character
+
+
+class Documents:
+    """Mirror of the documents BBEdit has open."""
+
+    def __init__(self):
+        self.texts = {}
+
+    def update(self, path, method, params):
+        if method == "textDocument/didOpen":
+            self.texts[path] = params["textDocument"].get("text", "")
+        elif method == "textDocument/didClose":
+            self.texts.pop(path, None)
+        elif method == "textDocument/didChange":
+            for change in params.get("contentChanges", []):
+                if "range" in change and path in self.texts:
+                    self.texts[path] = apply_change(self.texts[path], change)
+                else:
+                    self.texts[path] = change.get("text", "")
+
+    def snap(self, path, line, character):
+        text = self.texts.get(path)
+        if text is None:
+            return line, character
+        return snap(text, line, character)
+
+
 class Server:
     """tinymist process; all writes to its stdin go through one lock."""
 
@@ -114,6 +218,7 @@ class Server:
         self.lock = threading.Lock()
         self.counter = 0
         self.pinned = None
+        self.documents = Documents()
         self.follow_timer = None
         self.warned_full_sync = False
 
@@ -145,9 +250,11 @@ class Server:
 
     def scroll_to(self, path, line, character):
         # line and character 0-based, as in LSP positions
+        line, character = self.documents.snap(path, line, character)
         pos = {"event": "panelScrollTo", "filepath": path,
                "line": line, "character": character}
         self.command("tinymist.scrollPreview", PREVIEW_TASK, pos)
+        return line, character
 
     def follow_edit(self, path, changes):
         ranged = [c for c in changes if "range" in c]
@@ -156,11 +263,10 @@ class Server:
                 self.warned_full_sync = True
                 log("didChange without ranges; the preview cannot follow typing")
             return
-        start = ranged[-1]["range"]["start"]
+        line, character = end_of_change(ranged[-1])
         if self.follow_timer is not None:
             self.follow_timer.cancel()
-        self.follow_timer = threading.Timer(
-            FOLLOW_DELAY, self.scroll_to, (path, start["line"], start["character"]))
+        self.follow_timer = threading.Timer(FOLLOW_DELAY, self.scroll_to, (path, line, character))
         self.follow_timer.daemon = True
         self.follow_timer.start()
 
@@ -181,13 +287,15 @@ def pump(server):
             msg = json.loads(body)
         except ValueError:
             msg = None
-        if isinstance(msg, dict) and msg.get("method") in PROJECT_METHODS:
-            uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
-            path = uri_to_path(uri)
+        if isinstance(msg, dict) and str(msg.get("method", "")).startswith("textDocument/did"):
+            method, params = msg["method"], msg.get("params", {})
+            path = uri_to_path(params.get("textDocument", {}).get("uri", ""))
             if path:
-                server.pin_project(path)
-                if msg["method"] == "textDocument/didChange":
-                    server.follow_edit(path, msg["params"].get("contentChanges", []))
+                server.documents.update(path, method, params)
+                if method in PROJECT_METHODS:
+                    server.pin_project(path)
+                if method == "textDocument/didChange":
+                    server.follow_edit(path, params.get("contentChanges", []))
         server.write(body)
     server.close()
 
@@ -213,17 +321,25 @@ def scroll_preview(server, line):
     except ValueError:
         log(f"ignoring scroll request {line!r}")
         return
-    server.scroll_to(path, line, character)
+    snapped = server.scroll_to(path, line, character)
+    log(f"scroll {os.path.basename(path)}:{row}:{col} -> {snapped[0] + 1}:{snapped[1] + 1}")
 
 
-def listen(server):
-    # one line per connection, from the "Sync Typst with Preview" script
+def remove_socket(inode=None):
+    """Remove the socket file unless another proxy has replaced it."""
     try:
-        os.unlink(SOCKET)
+        if inode is None or os.stat(SOCKET).st_ino == inode:
+            os.unlink(SOCKET)
     except FileNotFoundError:
         pass
+
+
+def listen(server, inode):
+    # one line per connection, from the "Sync Typst with Preview" script
+    remove_socket()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(SOCKET)
+    inode.append(os.stat(SOCKET).st_ino)
     sock.listen(4)
     while True:
         conn, _ = sock.accept()
@@ -237,8 +353,9 @@ def main():
     tinymist = find("tinymist")
     bbedit = find("bbedit")
     server = Server(tinymist)
+    inode = []
     threading.Thread(target=pump, args=(server,), daemon=True).start()
-    threading.Thread(target=listen, args=(server,), daemon=True).start()
+    threading.Thread(target=listen, args=(server, inode), daemon=True).start()
 
     # tinymist -> BBEdit, one message at a time
     out = sys.stdout.buffer
@@ -263,10 +380,8 @@ def main():
         out.write(body)
         out.flush()
 
-    try:
-        os.unlink(SOCKET)
-    except FileNotFoundError:
-        pass
+    # a proxy started meanwhile may own the socket file by now
+    remove_socket(inode[0] if inode else None)
     code = server.proc.wait()
     # the pump thread still holds stdin's lock; interpreter finalization
     # would abort on it, so skip finalization

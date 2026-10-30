@@ -44,6 +44,8 @@ The jump needs the proxy. BBEdit opens the file named in the `window/showDocumen
 
 The other direction: while you type, the preview follows the edit position shortly after the last keystroke, taken from the `textDocument/didChange` notifications. Moving the cursor without editing is invisible to the server, since LSP has no cursor notification; for that, "Sync Typst with Preview" in the Scripts menu scrolls the preview to the cursor (assign it a shortcut in the Menus & Shortcuts preferences). BBEdit cannot invoke server commands itself, so the script hands the position to the proxy over a Unix socket, and the proxy issues the `tinymist.scrollPreview` command.
 
+The server can only resolve a position directly behind a character of markup or math text, not in whitespace, markup syntax or code. The proxy keeps a copy of the open documents and moves each position to the nearest such place on the same or a nearby line before asking, so both ways of scrolling work from blank lines, list markers or the start of a word as well.
+
 == Working with Multiple-File Projects
 
 BBEdit has no workspace folders and cannot pin a main file, so on its own the server would compile each chapter file by itself. Put a `typst.toml` into the project's root directory that names the main file:
@@ -70,3 +72,4 @@ Command-line arguments for the compiler go into `typstExtraArgs`, for example `[
 = Troubleshooting
 
 BBEdit does not restart a language server that exits; after replacing `tinymist-bbedit` or changing `Typst.json`, restart BBEdit. The server log is `LanguageServerProtocol-Typst.txt` in BBEdit's Logs folder (application menu, Folders), see BBEdit's #link("https://www.barebones.com/support/bbedit/lsp-notes.html")[language server notes].
+The proxy and the Sync script append to `~/Library/Caches/tinymist-bbedit.log`: the main file pinned for each project, every scroll request with the position it was moved to, and failed commands.
