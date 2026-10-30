@@ -1,0 +1,22 @@
+{
+  "initializationOptions": {
+    "preview": {
+      "background": {
+        "enabled": true,
+        "args": ["--data-plane-host=127.0.0.1:23635", "--invert-colors=never"]
+      }
+    }
+  },
+  "workspaceConfigurations": {
+    "*": {
+      "tinymist": {
+        "preview": {
+          "background": {
+            "enabled": true,
+            "args": ["--data-plane-host=127.0.0.1:23635", "--invert-colors=never"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -11,3 +11,4 @@ Check the following chapters for uses:
 - #cross-link("/frontend/sublime-text.typ")[Sublime Text]
 - #cross-link("/frontend/helix.typ")[Helix]
 - #cross-link("/frontend/zed.typ")[Zed]
+- #cross-link("/frontend/bbedit.typ")[BBEdit]

@@ -97,6 +97,7 @@ Follow the instructions to enable tinymist in your favorite editor.
 - [Sublime Text](https://myriad-dreamin.github.io/tinymist/frontend/sublime-text.html)
 - [Helix](https://myriad-dreamin.github.io/tinymist/frontend/helix.html)
 - [Zed](https://myriad-dreamin.github.io/tinymist/frontend/zed.html)
+- [BBEdit](https://myriad-dreamin.github.io/tinymist/frontend/bbedit.html)
 
 ## Installing Regular/Nightly Prebuilds from GitHub
 

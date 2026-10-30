@@ -1,0 +1,278 @@
+#!/usr/bin/python3
+"""Run tinymist as a language server for BBEdit.
+
+Three gaps in BBEdit's LSP support are bridged here:
+
+- BBEdit (tested with 15.5 and 16.0) opens the file named in a
+  window/showDocument request but ignores its selection, so a click in
+  the preview would land on line 1. The proxy answers those requests
+  itself: it opens the file at the requested position with the bbedit
+  command-line tool and reports success to the server.
+
+- BBEdit cannot send workspace/executeCommand, so the editor cannot
+  scroll the preview. The proxy listens on a Unix socket; a BBEdit
+  script writes "path<TAB>line<TAB>column" (1-based) there and the proxy
+  turns it into the tinymist.scrollPreview command. While typing, the
+  proxy also scrolls the preview to the edit position taken from
+  textDocument/didChange, shortly after the last keystroke. Cursor
+  movement without editing is invisible to the server.
+
+- BBEdit has no workspace folders or project commands, so the server
+  would compile every file on its own. A typst.toml in the project's
+  root directory names the main file in its "entrypoint" field (the
+  package manifest format). Whenever BBEdit opens or edits a file, the
+  proxy looks for the manifest above it and pins that main file with
+  tinymist.pinMain; tinymist takes the manifest's directory as root.
+
+Everything else passes through unchanged.
+"""
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+from urllib.parse import unquote, urlparse
+
+SHOW_DOCUMENT = "window/showDocument"
+MANIFEST = "typst.toml"
+SOCKET = os.environ.get("TINYMIST_BBEDIT_SOCKET",
+                        os.path.expanduser("~/Library/Caches/tinymist-bbedit.sock"))
+# BBEdit starts servers with a minimal PATH
+EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.cargo/bin")]
+# task id of tinymist's background preview
+PREVIEW_TASK = "default_preview"
+# request ids of the proxy's own requests, never forwarded to BBEdit
+OWN_ID = "tinymist-bbedit-"
+PROJECT_METHODS = ("textDocument/didOpen", "textDocument/didChange", "textDocument/didSave")
+# seconds after the last keystroke before the preview follows it
+FOLLOW_DELAY = 0.3
+# seconds tinymist gets to exit after BBEdit closed the connection
+EXIT_GRACE = 5
+ENTRYPOINT = re.compile(r'^\s*entrypoint\s*=\s*"([^"]+)"', re.MULTILINE)
+
+
+def log(text):
+    print("tinymist-bbedit:", text, file=sys.stderr, flush=True)
+
+
+def find(name):
+    path = os.pathsep.join([os.environ.get("PATH", "")] + EXTRA_PATH)
+    found = shutil.which(name, path=path)
+    if found is None:
+        sys.exit(f"tinymist-bbedit: {name} not found in {path}")
+    return found
+
+
+def read_message(stream):
+    length = None
+    while True:
+        line = stream.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, _, value = line.decode("ascii").partition(":")
+        if key.strip().lower() == "content-length":
+            length = int(value)
+    return stream.read(length)
+
+
+def uri_to_path(uri):
+    if not uri.startswith("file://"):
+        return None
+    return unquote(urlparse(uri).path)
+
+
+def main_file_of(path):
+    """The entrypoint of the nearest typst.toml above path, or None."""
+    directory = os.path.dirname(os.path.abspath(path))
+    while True:
+        manifest = os.path.join(directory, MANIFEST)
+        if os.path.isfile(manifest):
+            with open(manifest, encoding="utf-8") as f:
+                found = ENTRYPOINT.search(f.read())
+            if found is None:
+                return None
+            return os.path.normpath(os.path.join(directory, found.group(1)))
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+class Server:
+    """tinymist process; all writes to its stdin go through one lock."""
+
+    def __init__(self, tinymist):
+        self.proc = subprocess.Popen(
+            [tinymist, "lsp"] + sys.argv[1:],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
+        )
+        self.lock = threading.Lock()
+        self.counter = 0
+        self.pinned = None
+        self.follow_timer = None
+        self.warned_full_sync = False
+
+    def write(self, body):
+        with self.lock:
+            self.proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body))
+            self.proc.stdin.write(body)
+            self.proc.stdin.flush()
+
+    def send(self, msg):
+        self.write(json.dumps(msg).encode("utf-8"))
+
+    def request(self, method, params):
+        self.counter += 1
+        self.send({"jsonrpc": "2.0", "id": OWN_ID + str(self.counter),
+                   "method": method, "params": params})
+
+    def command(self, name, *arguments):
+        self.request("workspace/executeCommand", {"command": name, "arguments": list(arguments)})
+
+    def pin_project(self, path):
+        main = main_file_of(path)
+        if main == self.pinned:
+            return
+        self.pinned = main
+        log(f"main file for {path}: {main}")
+        # None lets the main file follow the focused document again
+        self.command("tinymist.pinMain", main)
+
+    def scroll_to(self, path, line, character):
+        # line and character 0-based, as in LSP positions
+        pos = {"event": "panelScrollTo", "filepath": path,
+               "line": line, "character": character}
+        self.command("tinymist.scrollPreview", PREVIEW_TASK, pos)
+
+    def follow_edit(self, path, changes):
+        ranged = [c for c in changes if "range" in c]
+        if not ranged:
+            if not self.warned_full_sync:
+                self.warned_full_sync = True
+                log("didChange without ranges; the preview cannot follow typing")
+            return
+        start = ranged[-1]["range"]["start"]
+        if self.follow_timer is not None:
+            self.follow_timer.cancel()
+        self.follow_timer = threading.Timer(
+            FOLLOW_DELAY, self.scroll_to, (path, start["line"], start["character"]))
+        self.follow_timer.daemon = True
+        self.follow_timer.start()
+
+    def close(self):
+        with self.lock:
+            self.proc.stdin.close()
+        # BBEdit may close the pipe without a shutdown request
+        threading.Timer(EXIT_GRACE, self.proc.terminate).start()
+
+
+def pump(server):
+    # BBEdit -> tinymist, whole messages so that injected ones never split one
+    while True:
+        body = read_message(sys.stdin.buffer)
+        if body is None:
+            break
+        try:
+            msg = json.loads(body)
+        except ValueError:
+            msg = None
+        if isinstance(msg, dict) and msg.get("method") in PROJECT_METHODS:
+            uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+            path = uri_to_path(uri)
+            if path:
+                server.pin_project(path)
+                if msg["method"] == "textDocument/didChange":
+                    server.follow_edit(path, msg["params"].get("contentChanges", []))
+        server.write(body)
+    server.close()
+
+
+def show_document(bbedit, params):
+    path = uri_to_path(params.get("uri", ""))
+    if path is None:
+        return
+    args = [bbedit]
+    sel = params.get("selection")
+    if sel:
+        start = sel["start"]
+        args.append("+%d:%d" % (start["line"] + 1, start["character"] + 1))
+    args.append(path)
+    subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def scroll_preview(server, line):
+    # "path\tline\tcolumn", 1-based as BBEdit's BB_DOC_SELSTART_* report it
+    try:
+        path, row, col = line.rstrip("\r\n").split("\t")
+        line, character = int(row) - 1, int(col) - 1
+    except ValueError:
+        log(f"ignoring scroll request {line!r}")
+        return
+    server.scroll_to(path, line, character)
+
+
+def listen(server):
+    # one line per connection, from the "Sync Typst with Preview" script
+    try:
+        os.unlink(SOCKET)
+    except FileNotFoundError:
+        pass
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(SOCKET)
+    sock.listen(4)
+    while True:
+        conn, _ = sock.accept()
+        with conn, conn.makefile("r", encoding="utf-8") as f:
+            line = f.readline()
+        if line:
+            scroll_preview(server, line)
+
+
+def main():
+    tinymist = find("tinymist")
+    bbedit = find("bbedit")
+    server = Server(tinymist)
+    threading.Thread(target=pump, args=(server,), daemon=True).start()
+    threading.Thread(target=listen, args=(server,), daemon=True).start()
+
+    # tinymist -> BBEdit, one message at a time
+    out = sys.stdout.buffer
+    while True:
+        body = read_message(server.proc.stdout)
+        if body is None:
+            break
+        try:
+            msg = json.loads(body)
+        except ValueError:
+            msg = None
+        if isinstance(msg, dict):
+            if msg.get("method") == SHOW_DOCUMENT and "id" in msg:
+                show_document(bbedit, msg.get("params", {}))
+                server.send({"jsonrpc": "2.0", "id": msg["id"], "result": {"success": True}})
+                continue
+            if str(msg.get("id", "")).startswith(OWN_ID):
+                if "error" in msg:
+                    log(f"request failed: {msg['error']}")
+                continue
+        out.write(b"Content-Length: %d\r\n\r\n" % len(body))
+        out.write(body)
+        out.flush()
+
+    try:
+        os.unlink(SOCKET)
+    except FileNotFoundError:
+        pass
+    code = server.proc.wait()
+    # the pump thread still holds stdin's lock; interpreter finalization
+    # would abort on it, so skip finalization
+    sys.stderr.flush()
+    os._exit(code if code >= 0 else 1)
+
+
+if __name__ == "__main__":
+    main()

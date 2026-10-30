@@ -183,6 +183,10 @@ const tasks = [
     output: "crates/typlite/README.md",
   },
   {
+    input: "docs/tinymist/frontend/bbedit.typ",
+    output: "editors/bbedit/README.md",
+  },
+  {
     input: "docs/tinymist/frontend/emacs.typ",
     output: "editors/emacs/README.md",
   },

@@ -23,6 +23,7 @@
       - #chapter("frontend/sublime-text.typ")[Sublime Text]
       - #chapter("frontend/helix.typ")[Helix]
       - #chapter("frontend/zed.typ")[Zed]
+      - #chapter("frontend/bbedit.typ")[BBEdit]
     = Features
     - #chapter("feature/cli.typ")[Command line interface]
     - #chapter("feature/syntax-only-mode.typ")[Syntax-Only Mode]
