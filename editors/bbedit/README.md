@@ -25,7 +25,7 @@ BBEdit starts language servers with a minimal `PATH` that does not include Homeb
 
 ## Setup Server
 
-BBEdit has no built-in Typst language, so a codeless language module provides it, with the language server declared inside the module. Copy the files from [editors/bbedit](/editors/bbedit) into BBEdit's application support folder:
+BBEdit has no built-in Typst language, so a codeless language module provides it, with the language server declared inside the module. Copy the files from [editors/bbedit](/editors/bbedit) into BBEdit’s application support folder:
 
 ```bash
 cd ~/Library/Application\ Support/BBEdit
@@ -37,10 +37,10 @@ cp "editors/bbedit/Sync Typst with Preview.sh" Scripts/
 
 - `Typst.plist` is the language module: `.typ` files, syntax colouring, headings in the function menu, and the `BBLMLanguageServerInfo` entry that names the server, so nothing needs to be set in the Languages preferences.
 - `tinymist-bbedit` is a small Python proxy around `tinymist lsp`, see below.
-- `Typst.json` holds the server configuration (`initializationOptions` and `workspaceConfigurations`, see BBEdit's [language server notes](https://www.barebones.com/support/bbedit/lsp-notes.html)).
+- `Typst.json` holds the server configuration (`initializationOptions` and `workspaceConfigurations`, see BBEdit’s [language server notes](https://www.barebones.com/support/bbedit/lsp-notes.html)).
 - `Sync Typst with Preview.sh` is a script for the Scripts menu that scrolls the preview to the cursor.
 
-Restart BBEdit: it reads language modules at launch. Open a `.typ` file; the status bar shows the language as "Typst" and the server starts.
+Restart BBEdit: it reads language modules at launch. Open a `.typ` file; the status bar shows the language as “Typst” and the server starts.
 
 ## Tips
 
@@ -48,15 +48,15 @@ Restart BBEdit: it reads language modules at launch. Open a `.typ` file; the sta
 
 `Typst.json` enables the [background preview](https://myriad-dreamin.github.io/tinymist/feature/preview.html) on port 23635. Open [http://127.0.0.1:23635](http://127.0.0.1:23635) in a browser next to BBEdit; it re-renders as you type. Clicking in the preview jumps to the source in BBEdit.
 
-The jump needs the proxy. BBEdit opens the file named in the `window/showDocument` request but ignores the selection, so the cursor would land on line 1. `tinymist-bbedit` intercepts these requests, opens the file at the position with the `bbedit` command-line tool (installed from BBEdit's application menu) and answers the server itself. Once BBEdit honours the selection, set `ServerCommand` in `Typst.plist` to `tinymist` and put a symlink to the executable into `Language Servers/`.
+The jump needs the proxy. BBEdit opens the file named in the `window/showDocument` request but ignores the selection, so the cursor would land on line 1. `tinymist-bbedit` intercepts these requests, opens the file at the position with the `bbedit` command-line tool (installed from BBEdit’s application menu) and answers the server itself. Once BBEdit honours the selection, set `ServerCommand` in `Typst.plist` to `tinymist` and put a symlink to the executable into `Language Servers/`.
 
-The other direction: while you type, the preview follows the edit position shortly after the last keystroke, taken from the `textDocument/didChange` notifications. Moving the cursor without editing is invisible to the server, since LSP has no cursor notification; for that, "Sync Typst with Preview" in the Scripts menu scrolls the preview to the cursor (assign it a shortcut in the Menus & Shortcuts preferences). BBEdit cannot invoke server commands itself, so the script hands the position to the proxy over a Unix socket, and the proxy issues the `tinymist.scrollPreview` command.
+The other direction: while you type, the preview follows the edit position shortly after the last keystroke, taken from the `textDocument/didChange` notifications. Moving the cursor without editing is invisible to the server, since LSP has no cursor notification; for that, “Sync Typst with Preview” in the Scripts menu scrolls the preview to the cursor (assign it a shortcut in the Menus & Shortcuts preferences). BBEdit cannot invoke server commands itself, so the script hands the position to the proxy over a Unix socket, and the proxy issues the `tinymist.scrollPreview` command.
 
 The server can only resolve a position directly behind a character of markup or math text, not in whitespace, markup syntax or code. The proxy keeps a copy of the open documents and moves each position to the nearest such place on the same or a nearby line before asking, so both ways of scrolling work from blank lines, list markers or the start of a word as well.
 
 ### Working with Multiple-File Projects
 
-BBEdit has no workspace folders and cannot pin a main file, so on its own the server would compile each chapter file by itself. Put a `typst.toml` into the project's root directory that names the main file:
+BBEdit has no workspace folders and cannot pin a main file, so on its own the server would compile each chapter file by itself. Put a `typst.toml` into the project’s root directory that names the main file:
 
 ```toml
 [package]
@@ -65,7 +65,7 @@ version = "0.1.0"
 entrypoint = "src/main.typ"
 ```
 
-Whenever BBEdit opens or edits a file, the proxy looks for the nearest `typst.toml` above it and pins its `entrypoint` with `tinymist.pinMain`; tinymist takes the manifest's directory as root. Switching between files of different projects switches the main file, and so the preview, without a restart. A file with no manifest above it is compiled on its own.
+Whenever BBEdit opens or edits a file, the proxy looks for the nearest `typst.toml` above it and pins its `entrypoint` with `tinymist.pinMain`; tinymist takes the manifest’s directory as root. Switching between files of different projects switches the main file, and so the preview, without a restart. A file with no manifest above it is compiled on its own.
 
 ### Working under Power-Saving Mode or with Resource-consumed Projects
 
@@ -81,5 +81,4 @@ Command-line arguments for the compiler go into `typstExtraArgs`, for example `[
 
 ## Troubleshooting
 
-BBEdit does not restart a language server that exits; after replacing `tinymist-bbedit` or changing `Typst.json`, restart BBEdit. The server log is `LanguageServerProtocol-Typst.txt` in BBEdit's Logs folder (application menu, Folders), see BBEdit's [language server notes](https://www.barebones.com/support/bbedit/lsp-notes.html).
-The proxy and the Sync script append to `~/Library/Caches/tinymist-bbedit.log`: the main file pinned for each project, every scroll request with the position it was moved to, and failed commands.
+BBEdit does not restart a language server that exits; after replacing `tinymist-bbedit` or changing `Typst.json`, restart BBEdit. The server log is `LanguageServerProtocol-Typst.txt` in BBEdit’s Logs folder (application menu, Folders), see BBEdit’s [language server notes](https://www.barebones.com/support/bbedit/lsp-notes.html). The proxy and the Sync script append to `~/Library/Caches/tinymist-bbedit.log`: the main file pinned for each project, every scroll request with the position it was moved to, and failed commands.

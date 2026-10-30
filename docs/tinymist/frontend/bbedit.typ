@@ -38,7 +38,7 @@ Restart BBEdit: it reads language modules at launch. Open a `.typ` file; the sta
 
 == Getting Preview Feature
 
-`Typst.json` enables the #cross-link("/feature/preview.typ", reference: <background-preview>)[background preview] on port 23635. Open #link("http://127.0.0.1:23635")[http://127.0.0.1:23635] in a browser next to BBEdit; it re-renders as you type. Clicking in the preview jumps to the source in BBEdit.
+`Typst.json` enables the #cross-link("/feature/preview.typ", reference: <background-preview>)[background preview] on port 23635. Open #link("http://127.0.0.1:23635") in a browser next to BBEdit; it re-renders as you type. Clicking in the preview jumps to the source in BBEdit.
 
 The jump needs the proxy. BBEdit opens the file named in the `window/showDocument` request but ignores the selection, so the cursor would land on line 1. `tinymist-bbedit` intercepts these requests, opens the file at the position with the `bbedit` command-line tool (installed from BBEdit's application menu) and answers the server itself. Once BBEdit honours the selection, set `ServerCommand` in `Typst.plist` to `tinymist` and put a symlink to the executable into `Language Servers/`.
 

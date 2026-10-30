@@ -60,6 +60,7 @@ Follow the instructions to enable tinymist in your favorite editor.
 - #cross-link("/frontend/sublime-text.typ")[Sublime Text]
 - #cross-link("/frontend/helix.typ")[Helix]
 - #cross-link("/frontend/zed.typ")[Zed]
+- #cross-link("/frontend/bbedit.typ")[BBEdit]
 
 = Installing Regular/Nightly Prebuilds from GitHub
 
